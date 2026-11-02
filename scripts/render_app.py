@@ -77,7 +77,7 @@ STRINGS = '''<?xml version="1.0" encoding="utf-8"?>
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.INTERNET" />
+__PERMISSIONS__
 
     <application
         android:allowBackup="true"
@@ -103,14 +103,26 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 MAIN_ACTIVITY = '''package __PACKAGE__;
 
 import android.app.Activity;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.webkit.GeolocationPermissions;
+import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import java.util.ArrayList;
 
 public class MainActivity extends Activity {
+    private static final String[] APP_PERMISSIONS = { __PERMS__ };
+    private static final String LOCATION = "android.permission.ACCESS_FINE_LOCATION";
+    private static final int REQUEST_STARTUP = 1001;
+    private static final int REQUEST_WEB = 1002;
     private WebView webView;
+    private PermissionRequest pendingWebRequest;
+    private GeolocationPermissions.Callback pendingGeoCallback;
+    private String pendingGeoOrigin;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -119,12 +131,84 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setGeolocationEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         webView.setWebViewClient(new WebViewClient());
-        webView.setWebChromeClient(new WebChromeClient());
-        webView.loadUrl(__URL__);
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(PermissionRequest request) {
+                String[] needed = missing(androidPermissionsFor(request.getResources()));
+                if (needed.length == 0) {
+                    request.grant(request.getResources());
+                    return;
+                }
+                pendingWebRequest = request;
+                requestPermissions(needed, REQUEST_WEB);
+            }
+
+            @Override
+            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+                if (hasPermission(LOCATION)) {
+                    callback.invoke(origin, true, false);
+                    return;
+                }
+                pendingGeoOrigin = origin;
+                pendingGeoCallback = callback;
+                requestPermissions(new String[] { LOCATION }, REQUEST_WEB);
+            }
+        });
         setContentView(webView);
+        webView.loadUrl(__URL__);
+        requestStartupPermissions();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_WEB) return;
+        if (pendingWebRequest != null) {
+            PermissionRequest request = pendingWebRequest;
+            pendingWebRequest = null;
+            if (missing(androidPermissionsFor(request.getResources())).length == 0) {
+                request.grant(request.getResources());
+            } else {
+                request.deny();
+            }
+        }
+        if (pendingGeoCallback != null) {
+            pendingGeoCallback.invoke(pendingGeoOrigin, hasPermission(LOCATION), false);
+            pendingGeoCallback = null;
+            pendingGeoOrigin = null;
+        }
+    }
+
+    private void requestStartupPermissions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        String[] startup = missing(APP_PERMISSIONS);
+        if (startup.length > 0) requestPermissions(startup, REQUEST_STARTUP);
+    }
+
+    private String[] androidPermissionsFor(String[] resources) {
+        ArrayList<String> list = new ArrayList<String>();
+        for (String resource : resources) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) list.add("android.permission.CAMERA");
+            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) list.add("android.permission.RECORD_AUDIO");
+        }
+        return list.toArray(new String[0]);
+    }
+
+    private String[] missing(String[] permissions) {
+        ArrayList<String> list = new ArrayList<String>();
+        for (String permission : permissions) {
+            if (!hasPermission(permission)) list.add(permission);
+        }
+        return list.toArray(new String[0]);
+    }
+
+    private boolean hasPermission(String permission) {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+            || checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
 
     @Override
@@ -137,6 +221,12 @@ public class MainActivity extends Activity {
     }
 }
 '''
+
+
+PERMISSIONS = [item for item in os.environ.get("PERMISSIONS", "").split(",") if item]
+ANDROID_PERMISSIONS = ["android.permission.INTERNET"] + ["android.permission." + item for item in PERMISSIONS]
+MANIFEST_PERMISSIONS = "\n".join('    <uses-permission android:name="%s" />' % name for name in ANDROID_PERMISSIONS)
+JAVA_PERMISSIONS = ", ".join('"%s"' % name for name in ANDROID_PERMISSIONS)
 
 
 def write_text(path, text):
@@ -179,10 +269,10 @@ def main():
     write_text("build.gradle", ROOT_BUILD)
     write_text("gradle.properties", GRADLE_PROPERTIES)
     write_text("app/build.gradle", APP_BUILD.replace("__PACKAGE__", PACKAGE))
-    write_text("app/src/main/AndroidManifest.xml", MANIFEST)
+    write_text("app/src/main/AndroidManifest.xml", MANIFEST.replace("__PERMISSIONS__", MANIFEST_PERMISSIONS))
     write_text("app/src/main/res/values/strings.xml", STRINGS.replace("__NAME__", html.escape(APP_NAME)))
     write_text("app/src/main/java/" + package_path + "/MainActivity.java",
-               MAIN_ACTIVITY.replace("__PACKAGE__", PACKAGE).replace("__URL__", json_string(APP_URL)))
+               MAIN_ACTIVITY.replace("__PACKAGE__", PACKAGE).replace("__PERMS__", JAVA_PERMISSIONS).replace("__URL__", json_string(APP_URL)))
     write_bytes("app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", app_icon())
 
 
