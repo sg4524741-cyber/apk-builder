@@ -20,6 +20,10 @@ on:
         required: false
         default: ''
         type: string
+      permissions:
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: write
 jobs:
@@ -46,6 +50,7 @@ jobs:
           APP_URL: ${{ inputs.app_url }}
           PACKAGE_NAME: ${{ inputs.package_name }}
           ICON_FILE: ${{ runner.temp }}/icon.png
+          PERMISSIONS: ${{ inputs.permissions }}
         run: python3 scripts/render_app.py
       - name: Build release APK
         working-directory: android
