@@ -68,6 +68,12 @@ android {
 }
 '''
 
+STRINGS = '''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">__NAME__</string>
+</resources>
+'''
+
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -174,13 +180,7 @@ def main():
     write_text("gradle.properties", GRADLE_PROPERTIES)
     write_text("app/build.gradle", APP_BUILD.replace("__PACKAGE__", PACKAGE))
     write_text("app/src/main/AndroidManifest.xml", MANIFEST)
-    write_text("app/src/main/res/values/strings.xml",
-               '<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">'
-               + html.escape(APP_NAME) + "</string>
-</resources>
-")
+    write_text("app/src/main/res/values/strings.xml", STRINGS.replace("__NAME__", html.escape(APP_NAME)))
     write_text("app/src/main/java/" + package_path + "/MainActivity.java",
                MAIN_ACTIVITY.replace("__PACKAGE__", PACKAGE).replace("__URL__", json_string(APP_URL)))
     write_bytes("app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", app_icon())
