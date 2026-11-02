@@ -1,0 +1,60 @@
+name: Build APK
+run-name: Build ${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: Build identifier
+        required: true
+        type: string
+      app_name:
+        required: true
+        type: string
+      app_url:
+        required: true
+        type: string
+      package_name:
+        required: true
+        type: string
+      icon_url:
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Download app icon
+        if: inputs.icon_url != ''
+        env:
+          ICON_URL: ${{ inputs.icon_url }}
+        run: curl -fsSL "$ICON_URL" -o "$RUNNER_TEMP/icon.png"
+      - name: Generate Android project
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          APP_URL: ${{ inputs.app_url }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          ICON_FILE: ${{ runner.temp }}/icon.png
+        run: python3 scripts/render_app.py
+      - name: Build release APK
+        working-directory: android
+        run: gradle assembleRelease --no-daemon
+      - name: Publish APK as release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/out/app.apk"
+          gh release create "build-$BUILD_ID" "$RUNNER_TEMP/out/app.apk" --repo "$GITHUB_REPOSITORY" --title "Build $BUILD_ID" --notes "Generated APK"
