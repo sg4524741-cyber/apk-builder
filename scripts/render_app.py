@@ -103,11 +103,19 @@ __PERMISSIONS__
 MAIN_ACTIVITY = '''package __PACKAGE__;
 
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -119,10 +127,12 @@ public class MainActivity extends Activity {
     private static final String LOCATION = "android.permission.ACCESS_FINE_LOCATION";
     private static final int REQUEST_STARTUP = 1001;
     private static final int REQUEST_WEB = 1002;
+    private static final int REQUEST_FILE = 1003;
     private WebView webView;
     private PermissionRequest pendingWebRequest;
     private GeolocationPermissions.Callback pendingGeoCallback;
     private String pendingGeoOrigin;
+    private ValueCallback<Uri[]> pendingFileCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -134,7 +144,13 @@ public class MainActivity extends Activity {
         settings.setGeolocationEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                view.evaluateJavascript(NOTIFICATION_POLYFILL, null);
+            }
+        });
+        webView.addJavascriptInterface(new NotifyBridge(), "AndroidNotifications");
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
@@ -156,6 +172,19 @@ public class MainActivity extends Activity {
                 pendingGeoOrigin = origin;
                 pendingGeoCallback = callback;
                 requestPermissions(new String[] { LOCATION }, REQUEST_WEB);
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, WebChromeClient.FileChooserParams params) {
+                if (pendingFileCallback != null) pendingFileCallback.onReceiveValue(null);
+                pendingFileCallback = callback;
+                try {
+                    startActivityForResult(params.createIntent(), REQUEST_FILE);
+                } catch (ActivityNotFoundException e) {
+                    pendingFileCallback = null;
+                    return false;
+                }
+                return true;
             }
         });
         setContentView(webView);
@@ -181,6 +210,29 @@ public class MainActivity extends Activity {
             pendingGeoCallback = null;
             pendingGeoOrigin = null;
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_FILE && pendingFileCallback != null) {
+            pendingFileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            pendingFileCallback = null;
+        }
+    }
+
+    private void showNotification(String title, String body) {
+        if (!hasPermission("android.permission.POST_NOTIFICATIONS")) return;
+        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(new NotificationChannel("web", "Website", NotificationManager.IMPORTANCE_DEFAULT));
+            builder = new Notification.Builder(this, "web");
+        } else {
+            builder = new Notification.Builder(this);
+        }
+        builder.setContentTitle(title).setContentText(body).setSmallIcon(android.R.drawable.ic_dialog_info).setAutoCancel(true);
+        manager.notify((int) System.currentTimeMillis(), builder.build());
     }
 
     private void requestStartupPermissions() {
@@ -211,6 +263,20 @@ public class MainActivity extends Activity {
             || checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
 
+    private static final String NOTIFICATION_POLYFILL = "(function(){if('Notification' in window)return;function N(title,options){this.title=String(title);this.body=options&&options.body?String(options.body):'';if(window.AndroidNotifications)window.AndroidNotifications.show(this.title,this.body);}N.permission='granted';N.requestPermission=function(cb){if(cb)cb('granted');return Promise.resolve('granted');};window.Notification=N;})();";
+
+    public class NotifyBridge {
+        @JavascriptInterface
+        public void show(final String title, final String body) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    showNotification(title, body);
+                }
+            });
+        }
+    }
+
     @Override
     public void onBackPressed() {
         if (webView.canGoBack()) {
@@ -225,6 +291,8 @@ public class MainActivity extends Activity {
 
 PERMISSIONS = [item for item in os.environ.get("PERMISSIONS", "").split(",") if item]
 ANDROID_PERMISSIONS = ["android.permission.INTERNET"] + ["android.permission." + item for item in PERMISSIONS]
+if "android.permission.ACCESS_FINE_LOCATION" in ANDROID_PERMISSIONS:
+    ANDROID_PERMISSIONS.append("android.permission.ACCESS_COARSE_LOCATION")
 MANIFEST_PERMISSIONS = "\n".join('    <uses-permission android:name="%s" />' % name for name in ANDROID_PERMISSIONS)
 JAVA_PERMISSIONS = ", ".join('"%s"' % name for name in ANDROID_PERMISSIONS)
 
