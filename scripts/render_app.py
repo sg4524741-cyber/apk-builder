@@ -103,9 +103,6 @@ __PERMISSIONS__
 MAIN_ACTIVITY = '''package __PACKAGE__;
 
 import android.app.Activity;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -113,7 +110,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.GeolocationPermissions;
-import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -147,10 +143,10 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                view.evaluateJavascript(NOTIFICATION_POLYFILL, null);
+                view.evaluateJavascript(NativeBridge.SCRIPT, null);
             }
         });
-        webView.addJavascriptInterface(new NotifyBridge(), "AndroidNotifications");
+        webView.addJavascriptInterface(new NativeBridge(this, webView), "AndroidNative");
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
@@ -221,20 +217,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showNotification(String title, String body) {
-        if (!hasPermission("android.permission.POST_NOTIFICATIONS")) return;
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        Notification.Builder builder;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(new NotificationChannel("web", "Website", NotificationManager.IMPORTANCE_DEFAULT));
-            builder = new Notification.Builder(this, "web");
-        } else {
-            builder = new Notification.Builder(this);
-        }
-        builder.setContentTitle(title).setContentText(body).setSmallIcon(android.R.drawable.ic_dialog_info).setAutoCancel(true);
-        manager.notify((int) System.currentTimeMillis(), builder.build());
-    }
-
     private void requestStartupPermissions() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
         String[] startup = missing(APP_PERMISSIONS);
@@ -263,20 +245,6 @@ public class MainActivity extends Activity {
             || checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
 
-    private static final String NOTIFICATION_POLYFILL = "(function(){if('Notification' in window)return;function N(title,options){this.title=String(title);this.body=options&&options.body?String(options.body):'';if(window.AndroidNotifications)window.AndroidNotifications.show(this.title,this.body);}N.permission='granted';N.requestPermission=function(cb){if(cb)cb('granted');return Promise.resolve('granted');};window.Notification=N;})();";
-
-    public class NotifyBridge {
-        @JavascriptInterface
-        public void show(final String title, final String body) {
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    showNotification(title, body);
-                }
-            });
-        }
-    }
-
     @Override
     public void onBackPressed() {
         if (webView.canGoBack()) {
@@ -295,6 +263,148 @@ if "android.permission.ACCESS_FINE_LOCATION" in ANDROID_PERMISSIONS:
     ANDROID_PERMISSIONS.append("android.permission.ACCESS_COARSE_LOCATION")
 MANIFEST_PERMISSIONS = "\n".join('    <uses-permission android:name="%s" />' % name for name in ANDROID_PERMISSIONS)
 JAVA_PERMISSIONS = ", ".join('"%s"' % name for name in ANDROID_PERMISSIONS)
+
+
+NATIVE_BRIDGE = '''package __PACKAGE__;
+
+import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.os.Build;
+import android.provider.ContactsContract;
+import android.telephony.TelephonyManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+public class NativeBridge {
+    static final String SCRIPT =
+        "(function(){if(window.__link2apkReady)return;window.__link2apkReady=true;"
+        + "var pending={},seq=0;"
+        + "window.__link2apkResolve=function(id,ok,payload){var p=pending[id];if(!p)return;delete pending[id];if(ok)p.resolve(payload);else p.reject(new Error(payload));};"
+        + "function call(method){return new Promise(function(resolve,reject){var id=String(++seq);pending[id]={resolve:resolve,reject:reject};window.AndroidNative[method](id);});}"
+        + "window.Link2Apk={getContacts:function(){return call('getContacts');},getPhoneState:function(){return call('getPhoneState');}};"
+        + "if(!('Notification' in window)){var N=function(title,options){this.title=String(title);this.body=options&&options.body?String(options.body):'';if(window.AndroidNative)window.AndroidNative.show(this.title,this.body);};"
+        + "N.permission='granted';N.requestPermission=function(cb){if(cb)cb('granted');return Promise.resolve('granted');};window.Notification=N;}"
+        + "})();";
+
+    private static final String CONTACTS = "android.permission.READ_CONTACTS";
+    private static final String PHONE_STATE = "android.permission.READ_PHONE_STATE";
+    private static final String NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
+    private static final String CHANNEL_ID = "web";
+    private static final int MAX_CONTACTS = 1000;
+
+    private final Activity activity;
+    private final WebView webView;
+
+    public NativeBridge(Activity activity, WebView webView) {
+        this.activity = activity;
+        this.webView = webView;
+    }
+
+    @JavascriptInterface
+    public void show(final String title, final String body) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showNotification(title, body);
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void getContacts(final String callId) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                if (!hasPermission(CONTACTS)) {
+                    resolve(callId, false, JSONObject.quote("Contacts permission was not granted"));
+                    return;
+                }
+                try {
+                    resolve(callId, true, readContacts().toString());
+                } catch (Exception e) {
+                    resolve(callId, false, JSONObject.quote("Could not read contacts"));
+                }
+            }
+        }).start();
+    }
+
+    @JavascriptInterface
+    public void getPhoneState(String callId) {
+        if (!hasPermission(PHONE_STATE)) {
+            resolve(callId, false, JSONObject.quote("Phone state permission was not granted"));
+            return;
+        }
+        try {
+            TelephonyManager telephony = (TelephonyManager) activity.getSystemService(Context.TELEPHONY_SERVICE);
+            JSONObject state = new JSONObject();
+            state.put("carrier", telephony.getNetworkOperatorName());
+            state.put("simState", telephony.getSimState());
+            resolve(callId, true, state.toString());
+        } catch (JSONException e) {
+            resolve(callId, false, JSONObject.quote("Could not read phone state"));
+        }
+    }
+
+    private JSONArray readContacts() throws JSONException {
+        JSONArray result = new JSONArray();
+        Cursor cursor = activity.getContentResolver().query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            new String[] { ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER },
+            null,
+            null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+        if (cursor == null) return result;
+        try {
+            while (cursor.moveToNext() && result.length() < MAX_CONTACTS) {
+                JSONObject contact = new JSONObject();
+                contact.put("name", cursor.getString(0));
+                contact.put("phone", cursor.getString(1));
+                result.put(contact);
+            }
+        } finally {
+            cursor.close();
+        }
+        return result;
+    }
+
+    private void showNotification(String title, String body) {
+        if (!hasPermission(NOTIFICATIONS)) return;
+        NotificationManager manager = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(new NotificationChannel(CHANNEL_ID, "Website", NotificationManager.IMPORTANCE_DEFAULT));
+            builder = new Notification.Builder(activity, CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(activity);
+        }
+        builder.setContentTitle(title).setContentText(body).setSmallIcon(android.R.drawable.ic_dialog_info).setAutoCancel(true);
+        manager.notify((int) System.currentTimeMillis(), builder.build());
+    }
+
+    private boolean hasPermission(String permission) {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+            || activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void resolve(final String callId, final boolean ok, final String payload) {
+        final String script = "window.__link2apkResolve(" + JSONObject.quote(callId) + "," + ok + "," + payload + ")";
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                webView.evaluateJavascript(script, null);
+            }
+        });
+    }
+}
+'''
 
 
 def write_text(path, text):
@@ -341,6 +451,7 @@ def main():
     write_text("app/src/main/res/values/strings.xml", STRINGS.replace("__NAME__", html.escape(APP_NAME)))
     write_text("app/src/main/java/" + package_path + "/MainActivity.java",
                MAIN_ACTIVITY.replace("__PACKAGE__", PACKAGE).replace("__PERMS__", JAVA_PERMISSIONS).replace("__URL__", json_string(APP_URL)))
+    write_text("app/src/main/java/" + package_path + "/NativeBridge.java", NATIVE_BRIDGE.replace("__PACKAGE__", PACKAGE))
     write_bytes("app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", app_icon())
 
 
